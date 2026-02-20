@@ -398,6 +398,11 @@ elProcessBtn.addEventListener('click',async()=>{
 
         const W=elInputCanvas.width, H=elInputCanvas.height;
 
+        // ⭐ 여기서 미리 확보
+        origData = elInputCanvas.getContext('2d').getImageData(0,0,W,H);
+
+        // 이후 모델 처리 계속
+
         // 1) 원본을 MODEL_SIZE로 리사이즈
         const resC=document.createElement('canvas');
         resC.width=MODEL_SIZE; resC.height=MODEL_SIZE;
@@ -452,9 +457,6 @@ elProcessBtn.addEventListener('click',async()=>{
         // 5-b) 엣지 전용 페더링
         if(el('optFeather').checked)
             featherEdgesOnly(alpha,W,H,parseInt(el('featherRadius').value));
-
-        // 먼저 origData 확보
-        origData=elInputCanvas.getContext('2d').getImageData(0,0,W,H);
 
         // 그 다음 SaaS 정제 적용
         applySaaSRefinement(alpha, origData, W, H);
