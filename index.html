@@ -452,6 +452,7 @@ elProcessBtn.addEventListener('click',async()=>{
         // 5-b) 엣지 전용 페더링
         if(el('optFeather').checked)
             featherEdgesOnly(alpha,W,H,parseInt(el('featherRadius').value));
+        applySaaSRefinement(alpha, origData, W, H);
 
         setProgress(92,'최종 합성 중...');
 
@@ -569,6 +570,116 @@ elDownloadBtn.addEventListener('click',()=>{
 });
 
 updateUndoBtns();
+/* ══════════════════════════════════════════════════════
+   SaaS 99%급 고급 매트 정제 엔진
+   Trimap + Laplacian + Edge Re-estimation + Decontam
+══════════════════════════════════════════════════════ */
+
+function createTrimap(alpha, w, h){
+    const trimap = new Uint8Array(w*h);
+    for(let i=0;i<w*h;i++){
+        const a = alpha[i];
+        if(a > 245) trimap[i] = 255;
+        else if(a < 10) trimap[i] = 0;
+        else trimap[i] = 128;
+    }
+    return trimap;
+}
+
+function laplacianRefine(alpha, trimap, w, h, iterations=2){
+    const tmp = new Float32Array(alpha.length);
+    for(let it=0; it<iterations; it++){
+        for(let y=1;y<h-1;y++){
+            for(let x=1;x<w-1;x++){
+                const i=y*w+x;
+                if(trimap[i]!==128) continue;
+                let sum=0;
+                sum+=alpha[i-1];
+                sum+=alpha[i+1];
+                sum+=alpha[i-w];
+                sum+=alpha[i+w];
+                tmp[i]=sum*0.25;
+            }
+        }
+        for(let i=0;i<w*h;i++){
+            if(trimap[i]===128) alpha[i]=tmp[i];
+        }
+    }
+}
+
+function edgeReestimate(alpha, imageData, w, h){
+    const d=imageData.data;
+    for(let y=1;y<h-1;y++){
+        for(let x=1;x<w-1;x++){
+            const i=y*w+x;
+            const idx=i*4;
+
+            const gx=d[idx+4]-d[idx-4];
+            const gy=d[idx+w*4]-d[idx-w*4];
+            const edge=Math.abs(gx)+Math.abs(gy);
+
+            if(edge>35 && alpha[i]>20 && alpha[i]<235){
+                alpha[i]=Math.min(255, alpha[i]*1.12);
+            }
+        }
+    }
+}
+
+function stabilizeAlpha(alpha){
+    for(let i=0;i<alpha.length;i++){
+        if(alpha[i]<6) alpha[i]=0;
+        if(alpha[i]>249) alpha[i]=255;
+    }
+}
+
+function decontaminateColors(alpha, imageData, w, h){
+    const d=imageData.data;
+    const n=w*h;
+
+    let bgR=0,bgG=0,bgB=0,bgCnt=0;
+
+    for(let i=0;i<n;i++){
+        if(alpha[i]<8){
+            bgR+=d[i*4];
+            bgG+=d[i*4+1];
+            bgB+=d[i*4+2];
+            bgCnt++;
+        }
+    }
+
+    if(bgCnt===0) return;
+
+    bgR/=bgCnt; bgG/=bgCnt; bgB/=bgCnt;
+
+    for(let i=0;i<n;i++){
+        const a=Math.max(0,Math.min(255,alpha[i]));
+        const af=a/255;
+
+        if(af>0.03 && af<0.98){
+            let r=d[i*4];
+            let g=d[i*4+1];
+            let b=d[i*4+2];
+
+            r=(r-bgR*(1-af))/af;
+            g=(g-bgG*(1-af))/af;
+            b=(b-bgB*(1-af))/af;
+
+            d[i*4]=Math.max(0,Math.min(255,Math.round(r)));
+            d[i*4+1]=Math.max(0,Math.min(255,Math.round(g)));
+            d[i*4+2]=Math.max(0,Math.min(255,Math.round(b)));
+        }
+
+        d[i*4+3]=a;
+    }
+}
+
+function applySaaSRefinement(alpha, imageData, W, H){
+    const trimap=createTrimap(alpha,W,H);
+    laplacianRefine(alpha,trimap,W,H,2);
+    edgeReestimate(alpha,imageData,W,H);
+    stabilizeAlpha(alpha);
+    decontaminateColors(alpha,imageData,W,H);
+}
 </script>
 </body>
 </html>
