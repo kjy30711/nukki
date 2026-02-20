@@ -452,6 +452,11 @@ elProcessBtn.addEventListener('click',async()=>{
         // 5-b) 엣지 전용 페더링
         if(el('optFeather').checked)
             featherEdgesOnly(alpha,W,H,parseInt(el('featherRadius').value));
+
+        // 먼저 origData 확보
+        origData=elInputCanvas.getContext('2d').getImageData(0,0,W,H);
+
+        // 그 다음 SaaS 정제 적용
         applySaaSRefinement(alpha, origData, W, H);
 
         setProgress(92,'최종 합성 중...');
