@@ -4,7 +4,6 @@
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <title>AI Background Remover Pro</title>
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"/>
     <style>
         :root{--red:#ef4444;--green:#22c55e;--orange:#f59e0b;--primary:#6366f1;}
@@ -233,35 +232,18 @@
 <div class="toast" id="toastEl">✅ 완료!</div>
 
 <script>
-/*
- * 모델 전략 (remove.bg 방식 참고)
- * ─────────────────────────────────────────────────────
- * RMBG-2.0: BriaAI의 최신 범용 배경 제거 모델
- *   - RMBG-1.4 대비 복잡한 배경, 어두운 배경, 반투명 객체에서 대폭 개선
- *   - IS-Net 아키텍처 기반, 1024×1024 입력
- *
- * 전처리: 이미지 정규화 (ImageNet mean/std) → 모델 정확도 향상
- * 후처리: 엣지 전용 페더링 (내부 픽셀 보존, 경계만 블러)
- * ─────────────────────────────────────────────────────
- */
-// RMBG-1.4: 로그인 없이 브라우저에서 직접 사용 가능한 최고 품질 공개 모델
-const MODEL_URL  = 'https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx';
-const MODEL_SIZE = 1024;
+// Cloudflare Workers AI 엔드포인트
+const WORKERS_URL = 'https://nukki.kjy30711.workers.dev';
 
-// RMBG-1.4 공식 정규화: /255 후 mean=0.5 빼기, std=1.0 (즉 -0.5 shift만)
-const MEAN = [0.5, 0.5, 0.5];
-const STD  = [1.0, 1.0, 1.0];
-
-let session=null, origData=null, isCompareMode=false;
+let origData=null, isCompareMode=false;
 let scale=1, posX=0, posY=0, isDragging=false, isSpacePressed=false, lastMouseX=0, lastMouseY=0;
-let currentBgColor='transparent', isModelLoading=false, compareJustOff=false;
+let currentBgColor='transparent', compareJustOff=false;
 let fillTolerance=32, fillDir='erase';
 let brushSize=40;
 let isBrushPainting=false;
 const undoStack=[], redoStack=[];
 let initialImageData=null;
-let rawAlpha=null;   // AI 추론 후 원본 알파 (페더링 실시간 재적용용)
-let bgRaw=0, bgGRaw=0, bgBRaw=0, bgDarkRaw=false; // 배경색 캐시
+let rawAlpha=null;   // Workers AI 결과 알파채널
 
 const el = id => document.getElementById(id);
 const elUpload       = el('upload');
@@ -351,183 +333,97 @@ el('reUploadBtn').addEventListener('click',e=>{
     elUpload.click();
 });
 
-/* ── 모델 로드 ── */
-async function loadModel(){
-    if(session||isModelLoading)return;
-    isModelLoading=true;
-    try{
-        setProgress(10,'AI 모델 로딩 중... (최초 1회, 약 20-40초)');
-        session=await ort.InferenceSession.create(MODEL_URL,{
-            executionProviders:['wasm']
-        });
-    }finally{isModelLoading=false;}
-}
-
 /* ══════════════════════════════════════════════════════
-   전처리: ImageNet 정규화
-   remove.bg 계열 모델은 단순 /255 가 아닌 mean/std 정규화가 필수.
-   이것이 정확도에 가장 큰 영향을 줌.
+   Cloudflare Workers AI 파이프라인
+   - Workers에서 배경제거 PNG 반환
+   - 반환된 PNG에서 알파채널 추출 → rawAlpha 저장
+   - 이후 Magic Brush / Flood Fill 편집 가능
 ══════════════════════════════════════════════════════ */
-function preprocessImage(imageData){
-    const {data, width, height} = imageData;
-    const n = width * height;
-    const tensor = new Float32Array(3 * n);
-    for(let i=0;i<n;i++){
-        tensor[i]         = (data[i*4]   / 255 - MEAN[0]) / STD[0]; // R
-        tensor[i + n]     = (data[i*4+1] / 255 - MEAN[1]) / STD[1]; // G
-        tensor[i + 2*n]   = (data[i*4+2] / 255 - MEAN[2]) / STD[2]; // B
-    }
-    return tensor;
-}
 
-/* ══════════════════════════════════════════════════════
-   후처리 ①: 고립 잔여물 자동 제거
-   AI가 그림자/반사광을 전경으로 오인한 작은 덩어리를
-   면적 기반으로 제거. 메인 오브젝트는 절대 건드리지 않음.
-══════════════════════════════════════════════════════ */
-function removeIsolatedComponents(alpha, w, h, minRatio=0.002){
-    const n=w*h;
-    const bin=new Uint8Array(n);
-    for(let i=0;i<n;i++) bin[i]=alpha[i]>=128?1:0;
-    const labels=new Int32Array(n);
-    const sizes=[0];
-    let nextLbl=1;
-    const q=[];
-    for(let s=0;s<n;s++){
-        if(!bin[s]||labels[s]) continue;
-        labels[s]=nextLbl; q.length=0; q.push(s);
-        let qi=0, sz=0;
-        while(qi<q.length){
-            const idx=q[qi++]; sz++;
-            const px=idx%w, py=(idx/w)|0;
-            if(px>0   &&bin[idx-1]&&!labels[idx-1]){labels[idx-1]=nextLbl;q.push(idx-1);}
-            if(px<w-1 &&bin[idx+1]&&!labels[idx+1]){labels[idx+1]=nextLbl;q.push(idx+1);}
-            if(py>0   &&bin[idx-w]&&!labels[idx-w]){labels[idx-w]=nextLbl;q.push(idx-w);}
-            if(py<h-1 &&bin[idx+w]&&!labels[idx+w]){labels[idx+w]=nextLbl;q.push(idx+w);}
-        }
-        sizes.push(sz); nextLbl++;
-    }
-    const maxSz=Math.max(...sizes.slice(1),1);
-    const minSz=Math.max(10,Math.floor(maxSz*minRatio));
-    for(let i=0;i<n;i++) if(labels[i]>0&&sizes[labels[i]]<minSz) alpha[i]=0;
-}
-
-/* ── 페더링 + 합성 공통 함수 (실시간 재적용 가능) ── */
+/* ── 합성 함수 (rawAlpha → 캔버스 출력) ── */
 function applyAndComposite(){
     if(!rawAlpha || !origData) return;
     const W=origData.width, H=origData.height, n2=W*H;
     const d=origData.data;
-
-    // rawAlpha 복사
-    const alpha=new Float32Array(rawAlpha);
-
-    // 합성
     const outCtx=elOutputCanvas.getContext('2d');
     const outImg=outCtx.createImageData(W,H);
     for(let i=0;i<n2;i++){
-        const a=Math.round(Math.max(0,Math.min(255,alpha[i])));
-        let r=d[i*4], g=d[i*4+1], b=d[i*4+2];
-        if(bgDarkRaw && a>0 && a<255){
-            const af=a/255;
-            r=Math.min(255,Math.max(0,Math.round((r-bgRaw*(1-af))/af)));
-            g=Math.min(255,Math.max(0,Math.round((g-bgGRaw*(1-af))/af)));
-            b=Math.min(255,Math.max(0,Math.round((b-bgBRaw*(1-af))/af)));
-        }
-        outImg.data[i*4]=r; outImg.data[i*4+1]=g; outImg.data[i*4+2]=b; outImg.data[i*4+3]=a;
+        const a=Math.round(Math.max(0,Math.min(255,rawAlpha[i])));
+        outImg.data[i*4]  =d[i*4];
+        outImg.data[i*4+1]=d[i*4+1];
+        outImg.data[i*4+2]=d[i*4+2];
+        outImg.data[i*4+3]=a;
     }
     outCtx.putImageData(outImg,0,0);
 }
 
 /* ── 메인 파이프라인 ── */
-elProcessBtn.addEventListener('click',async()=>{
+elProcessBtn.addEventListener('click', async()=>{
     if(elProcessBtn.disabled) return;
     elProcessBtn.disabled=true;
     try{
-        await loadModel();
-        setProgress(30,'이미지 전처리 중...');
-
+        setProgress(10, '이미지 준비 중...');
         const W=elInputCanvas.width, H=elInputCanvas.height;
 
-        // 1) 원본을 MODEL_SIZE로 리사이즈
-        const resC=document.createElement('canvas');
-        resC.width=MODEL_SIZE; resC.height=MODEL_SIZE;
-        resC.getContext('2d').drawImage(elInputCanvas,0,0,MODEL_SIZE,MODEL_SIZE);
-        const imgD=resC.getContext('2d').getImageData(0,0,MODEL_SIZE,MODEL_SIZE);
+        // 1) 캔버스 → Blob → FormData
+        const blob = await new Promise(res => elInputCanvas.toBlob(res, 'image/png'));
+        const formData = new FormData();
+        formData.append('image', blob, 'image.png');
 
-        // 2) ImageNet 정규화 전처리
-        const tensor=preprocessImage(imgD);
+        setProgress(30, 'AI 배경 제거 중... (2~5초)');
 
-        setProgress(50,'AI 배경 분석 중...');
-
-        // 3) 모델 추론
-        const inputName=session.inputNames[0];
-        const res=await session.run({
-            [inputName]: new ort.Tensor('float32', tensor, [1,3,MODEL_SIZE,MODEL_SIZE])
+        // 2) Cloudflare Workers AI 호출
+        const res = await fetch(WORKERS_URL, {
+            method: 'POST',
+            body: formData
         });
-        const outputName=session.outputNames[0];
-        const rawMask=res[outputName].data; // Float32Array
+        if(!res.ok) throw new Error(`서버 오류: ${res.status}`);
 
-        setProgress(75,'마스크 정제 중...');
+        setProgress(70, '결과 처리 중...');
 
-        // 4) 마스크 → 원본 해상도 업스케일
-        const mC=document.createElement('canvas');mC.width=MODEL_SIZE;mC.height=MODEL_SIZE;
-        const mCtx=mC.getContext('2d');
-        const mImg=mCtx.createImageData(MODEL_SIZE,MODEL_SIZE);
-        // 공식 postprocess_image: min-max 정규화 후 0~255 변환
-        let ma=-Infinity, mi=Infinity;
-        for(let i=0;i<MODEL_SIZE*MODEL_SIZE;i++){if(rawMask[i]>ma)ma=rawMask[i];if(rawMask[i]<mi)mi=rawMask[i];}
-        const range=ma-mi||1e-6;
-        for(let i=0;i<MODEL_SIZE*MODEL_SIZE;i++){
-            const v=Math.round(((rawMask[i]-mi)/range)*255);
-            mImg.data[i*4]=mImg.data[i*4+1]=mImg.data[i*4+2]=v;
-            mImg.data[i*4+3]=255;
-        }
-        mCtx.putImageData(mImg,0,0);
+        // 3) 반환된 PNG(투명 배경) → 캔버스에 그려서 알파 추출
+        const resultBlob = await res.blob();
+        const resultUrl  = URL.createObjectURL(resultBlob);
+        const resultImg  = await new Promise((res, rej)=>{
+            const img=new Image();
+            img.onload=()=>res(img);
+            img.onerror=rej;
+            img.src=resultUrl;
+        });
 
-        const bC=document.createElement('canvas');bC.width=W;bC.height=H;
-        // bilinear 업스케일 (Canvas 기본)
-        const bCtx=bC.getContext('2d');
-        bCtx.imageSmoothingEnabled=true;
-        bCtx.imageSmoothingQuality='high';
-        bCtx.drawImage(mC,0,0,W,H);
-        const bPx=bCtx.getImageData(0,0,W,H).data;
+        // 4) AI 결과 PNG에서 알파채널 추출 → rawAlpha
+        const tmpC=document.createElement('canvas');
+        tmpC.width=W; tmpC.height=H;
+        const tmpCtx=tmpC.getContext('2d');
+        tmpCtx.drawImage(resultImg, 0, 0, W, H);
+        const resultPx=tmpCtx.getImageData(0,0,W,H);
+        URL.revokeObjectURL(resultUrl);
 
         const n2=W*H;
-        const alpha=new Float32Array(n2);
-        for(let i=0;i<n2;i++) alpha[i]=bPx[i*4];
+        rawAlpha=new Float32Array(n2);
+        for(let i=0;i<n2;i++) rawAlpha[i]=resultPx.data[i*4+3];
 
-        // 5-a) 고립 잔여물 자동 제거
-        removeIsolatedComponents(alpha, W, H, 0.002);
-
-        // 5-b) rawAlpha 저장 (페더링 실시간 재적용용)
-        rawAlpha = new Float32Array(alpha);
-
-        // 배경색 캐시 (합성 함수에서 재사용)
+        // 5) 원본 픽셀 데이터 저장
         origData=elInputCanvas.getContext('2d').getImageData(0,0,W,H);
-        const d0=origData.data;
-        let bgCnt0=0; bgRaw=0; bgGRaw=0; bgBRaw=0;
-        for(let i=0;i<n2;i++){
-            if(alpha[i]===0){ bgRaw+=d0[i*4]; bgGRaw+=d0[i*4+1]; bgBRaw+=d0[i*4+2]; bgCnt0++; }
-        }
-        if(bgCnt0>0){ bgRaw/=bgCnt0; bgGRaw/=bgCnt0; bgBRaw/=bgCnt0; }
-        bgDarkRaw = (bgRaw+bgGRaw+bgBRaw)<150 && bgCnt0>n2*0.03;
 
-        setProgress(92,'최종 합성 중...');
+        setProgress(90, '최종 합성 중...');
 
-        // 5-b) 합성
+        // 6) 합성 후 출력
         elOutputCanvas.width=W; elOutputCanvas.height=H;
         applyAndComposite();
 
         undoStack.length=0; redoStack.length=0; updateUndoBtns();
-        initialImageData=elOutputCanvas.getContext('2d').getImageData(0,0,elOutputCanvas.width,elOutputCanvas.height);
+        initialImageData=elOutputCanvas.getContext('2d').getImageData(0,0,W,H);
 
-        setProgress(100,'완료!');
+        setProgress(100, '완료!');
         elEditorLayout.classList.add('show');
-        setTimeout(()=>{resetZoom();elCmpWrapper.classList.add('ready');},50);
+        setTimeout(()=>{ resetZoom(); elCmpWrapper.classList.add('ready'); }, 50);
         showToast('✨ 배경 제거 완료!');
+
     }catch(err){
         console.error(err);
-        showToast('오류: '+err.message);
+        showToast('❌ 오류: ' + err.message);
+        setProgress(0,'');
     }finally{
         elProcessBtn.disabled=false;
     }
