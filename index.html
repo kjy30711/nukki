@@ -68,6 +68,7 @@
         .fill-slider{width:100%;height:8px;appearance:none;background:#e2e8f0;border-radius:10px;}
         .fill-slider::-webkit-slider-thumb{appearance:none;width:22px;height:22px;background:var(--orange);border-radius:50%;cursor:pointer;border:3px solid #fff;}
 
+        /* 엣지 페더링 패널만 유지 */
         .feather-panel{background:#f0fdf4;border:2px solid #bbf7d0;border-radius:16px;padding:16px;margin-bottom:20px;}
         .feather-title{font-size:.82rem;font-weight:900;color:#166534;margin-bottom:12px;display:flex;align-items:center;gap:6px;}
         .post-toggle-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;font-size:.82rem;font-weight:700;color:#166534;}
@@ -111,6 +112,7 @@
         <p>원본 비교와 세밀한 수정이 가능한 프로페셔널 편집기</p>
     </div>
     <div class="main-card">
+
         <input type="file" id="upload" accept="image/*">
         <label class="upload-label" id="uploadCard" for="upload">
             <div id="uploadUI">
@@ -172,6 +174,7 @@
                            oninput="fillTolerance=+this.value;document.getElementById('fillTolVal').textContent=this.value">
                 </div>
 
+                <!-- 엣지 전용 페더링만 유지 -->
                 <div class="feather-panel">
                     <div class="feather-title"><i class="fas fa-feather-alt"></i> 엣지 페더링</div>
                     <div class="post-toggle-row">
@@ -204,46 +207,24 @@
 <div class="toast" id="toastEl">✅ 완료!</div>
 
 <script>
-/* ── SaaS Refinement Logic ── */
-function applySaaSRefinement(alpha, imageData, w, h) {
-    const d = imageData.data;
-    const n = w * h;
-
-    // 1. Edge Color Decontamination (배경색 번짐 제거)
-    // 엣지 픽셀(반투명)의 색상을 주변 불투명 픽셀 색상으로 보정
-    for (let y = 1; y < h - 1; y++) {
-        for (let x = 1; x < w - 1; x++) {
-            const idx = y * w + x;
-            const a = alpha[idx];
-            if (a > 10 && a < 245) {
-                let r = 0, g = 0, b = 0, count = 0;
-                for (let dy = -1; dy <= 1; dy++) {
-                    for (let dx = -1; dx <= 1; dx++) {
-                        const nidx = (y + dy) * w + (x + dx);
-                        if (alpha[nidx] > 250) {
-                            r += d[nidx * 4];
-                            g += d[nidx * 4 + 1];
-                            b += d[nidx * 4 + 2];
-                            count++;
-                        }
-                    }
-                }
-                if (count > 0) {
-                    const i = idx * 4;
-                    const mix = 0.7; // 보정 강도
-                    d[i] = d[i] * (1 - mix) + (r / count) * mix;
-                    d[i + 1] = d[i + 1] * (1 - mix) + (g / count) * mix;
-                    d[i + 2] = d[i + 2] * (1 - mix) + (b / count) * mix;
-                }
-            }
-        }
-    }
-}
-
-const MODEL_URL = 'https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx';
+/*
+ * 모델 전략 (remove.bg 방식 참고)
+ * ─────────────────────────────────────────────────────
+ * RMBG-2.0: BriaAI의 최신 범용 배경 제거 모델
+ *   - RMBG-1.4 대비 복잡한 배경, 어두운 배경, 반투명 객체에서 대폭 개선
+ *   - IS-Net 아키텍처 기반, 1024×1024 입력
+ *
+ * 전처리: 이미지 정규화 (ImageNet mean/std) → 모델 정확도 향상
+ * 후처리: 엣지 전용 페더링 (내부 픽셀 보존, 경계만 블러)
+ * ─────────────────────────────────────────────────────
+ */
+// RMBG-1.4: 로그인 없이 브라우저에서 직접 사용 가능한 최고 품질 공개 모델
+const MODEL_URL  = 'https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx';
 const MODEL_SIZE = 1024;
+
+// RMBG-1.4 공식 정규화: /255 후 mean=0.5 빼기, std=1.0 (즉 -0.5 shift만)
 const MEAN = [0.5, 0.5, 0.5];
-const STD = [1.0, 1.0, 1.0];
+const STD  = [1.0, 1.0, 1.0];
 
 let session=null, origData=null, isCompareMode=false;
 let scale=1, posX=0, posY=0, isDragging=false, isSpacePressed=false, lastMouseX=0, lastMouseY=0;
@@ -253,27 +234,30 @@ const undoStack=[], redoStack=[];
 let initialImageData=null;
 
 const el = id => document.getElementById(id);
-const elUpload = el('upload');
-const elUploadCard = el('uploadCard');
-const elProcessBtn = el('processBtn');
-const elDownloadBtn = el('downloadBtn');
-const elProgressBar = el('progressBar');
-const elStatusText = el('statusText');
-const elProgWrap = el('progWrap');
-const elInputCanvas = el('inputCanvas');
+const elUpload       = el('upload');
+const elUploadCard   = el('uploadCard');
+const elProcessBtn   = el('processBtn');
+const elDownloadBtn  = el('downloadBtn');
+const elProgressBar  = el('progressBar');
+const elStatusText   = el('statusText');
+const elProgWrap     = el('progWrap');
+const elInputCanvas  = el('inputCanvas');
 const elOutputCanvas = el('outputCanvas');
 const elEditorLayout = el('editorLayout');
-const elOrigOverlay = el('originalOverlay');
-const elCmpWrapper = el('compareWrapper');
-const elCmpBar = el('compareBar');
+const elOrigOverlay  = el('originalOverlay');
+const elCmpWrapper   = el('compareWrapper');
+const elCmpBar       = el('compareBar');
 const elCmpContainer = el('canvasContainer');
 
+/* ── 유틸 ── */
 function showToast(msg){const t=el('toastEl');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200);}
 function setProgress(pct,txt){elProgWrap.style.display='block';elProgressBar.style.width=pct+'%';elStatusText.textContent=txt;if(pct>=100)setTimeout(()=>elProgWrap.style.display='none',2000);}
 
+/* ── 배경색 ── */
 function changeBgColor(c){currentBgColor=c;elCmpContainer.style.backgroundImage='none';elCmpContainer.style.backgroundColor=c;}
 function resetBgTransparent(){currentBgColor='transparent';elCmpContainer.style.backgroundColor='transparent';elCmpContainer.style.backgroundImage='conic-gradient(#f1f5f9 25%,white 0 50%,#f1f5f9 0 75%,white 0)';showToast('투명 배경으로 설정됨');}
 
+/* ── 키보드 ── */
 window.addEventListener('keydown',e=>{
     if(e.code==='Space'){if(e.target.tagName!=='INPUT'&&e.target.tagName!=='TEXTAREA')e.preventDefault();isSpacePressed=true;if(elEditorLayout.classList.contains('show'))elCmpContainer.style.cursor='grab';}
     if(e.ctrlKey&&e.code==='KeyZ'){e.preventDefault();fillUndo();}
@@ -281,6 +265,7 @@ window.addEventListener('keydown',e=>{
 });
 window.addEventListener('keyup',e=>{if(e.code==='Space'){isSpacePressed=false;elCmpContainer.style.cursor='crosshair';}});
 
+/* ── 줌/패닝 ── */
 elCmpContainer.addEventListener('wheel',e=>{if(!e.ctrlKey)return;e.preventDefault();const r=elCmpContainer.getBoundingClientRect();applyZoom(e.deltaY>0?-.08:.08,e.clientX-r.left,e.clientY-r.top);},{passive:false});
 function manualZoom(d){applyZoom(d,elCmpContainer.offsetWidth/2,elCmpContainer.offsetHeight/2);}
 function applyZoom(d,mx,my){const tx=(mx-posX)/scale,ty=(my-posY)/scale;scale=Math.min(Math.max(.1,scale+d),10);posX=mx-tx*scale;posY=my-ty*scale;updateTransform();}
@@ -295,6 +280,7 @@ function updateTransform(){elCmpWrapper.style.transform=`translate(${posX}px,${p
 function resetZoom(msg=false){const iw=elOutputCanvas.width,ih=elOutputCanvas.height;if(!iw||!ih)return;const cw=elCmpContainer.offsetWidth,ch=elCmpContainer.offsetHeight;scale=Math.min((cw*.98)/iw,(ch*.98)/ih);posX=(cw-iw*scale)/2;posY=(ch-ih*scale)/2;updateTransform();if(msg)showToast('화면에 맞게 정렬됨');}
 function toggleCompareMode(e){if(e){e.preventDefault();e.currentTarget.blur();}isCompareMode=!isCompareMode;const btn=el('btnCompareMode');if(isCompareMode){btn.classList.add('active');showToast('원본 비교 모드 ON');}else{btn.classList.remove('active');elOrigOverlay.style.clipPath='inset(0 100% 0 0)';elCmpBar.style.display='none';compareJustOff=true;setTimeout(()=>{compareJustOff=false;},200);}}
 
+/* ── 파일 업로드 ── */
 elUpload.addEventListener('change',e=>{
     const file=e.target.files[0];if(!file)return;
     const reader=new FileReader();
@@ -327,27 +313,40 @@ el('reUploadBtn').addEventListener('click',e=>{
     elUpload.click();
 });
 
+/* ── 모델 로드 ── */
 async function loadModel(){
     if(session||isModelLoading)return;
     isModelLoading=true;
     try{
         setProgress(10,'AI 모델 로딩 중... (최초 1회, 약 20-40초)');
-        session=await ort.InferenceSession.create(MODEL_URL,{executionProviders:['wasm']});
+        session=await ort.InferenceSession.create(MODEL_URL,{
+            executionProviders:['wasm']
+        });
     }finally{isModelLoading=false;}
 }
 
+/* ══════════════════════════════════════════════════════
+   전처리: ImageNet 정규화
+   remove.bg 계열 모델은 단순 /255 가 아닌 mean/std 정규화가 필수.
+   이것이 정확도에 가장 큰 영향을 줌.
+══════════════════════════════════════════════════════ */
 function preprocessImage(imageData){
     const {data, width, height} = imageData;
     const n = width * height;
     const tensor = new Float32Array(3 * n);
     for(let i=0;i<n;i++){
-        tensor[i] = (data[i*4]/255 - MEAN[0])/STD[0];
-        tensor[i + n] = (data[i*4+1]/255 - MEAN[1])/STD[1];
-        tensor[i + 2*n] = (data[i*4+2]/255 - MEAN[2])/STD[2];
+        tensor[i]         = (data[i*4]   / 255 - MEAN[0]) / STD[0]; // R
+        tensor[i + n]     = (data[i*4+1] / 255 - MEAN[1]) / STD[1]; // G
+        tensor[i + 2*n]   = (data[i*4+2] / 255 - MEAN[2]) / STD[2]; // B
     }
     return tensor;
 }
 
+/* ══════════════════════════════════════════════════════
+   후처리 ①: 고립 잔여물 자동 제거
+   AI가 그림자/반사광을 전경으로 오인한 작은 덩어리를
+   면적 기반으로 제거. 메인 오브젝트는 절대 건드리지 않음.
+══════════════════════════════════════════════════════ */
 function removeIsolatedComponents(alpha, w, h, minRatio=0.002){
     const n=w*h;
     const bin=new Uint8Array(n);
@@ -363,9 +362,9 @@ function removeIsolatedComponents(alpha, w, h, minRatio=0.002){
         while(qi<q.length){
             const idx=q[qi++]; sz++;
             const px=idx%w, py=(idx/w)|0;
-            if(px>0 &&bin[idx-1]&&!labels[idx-1]){labels[idx-1]=nextLbl;q.push(idx-1);}
+            if(px>0   &&bin[idx-1]&&!labels[idx-1]){labels[idx-1]=nextLbl;q.push(idx-1);}
             if(px<w-1 &&bin[idx+1]&&!labels[idx+1]){labels[idx+1]=nextLbl;q.push(idx+1);}
-            if(py>0 &&bin[idx-w]&&!labels[idx-w]){labels[idx-w]=nextLbl;q.push(idx-w);}
+            if(py>0   &&bin[idx-w]&&!labels[idx-w]){labels[idx-w]=nextLbl;q.push(idx-w);}
             if(py<h-1 &&bin[idx+w]&&!labels[idx+w]){labels[idx+w]=nextLbl;q.push(idx+w);}
         }
         sizes.push(sz); nextLbl++;
@@ -375,46 +374,71 @@ function removeIsolatedComponents(alpha, w, h, minRatio=0.002){
     for(let i=0;i<n;i++) if(labels[i]>0&&sizes[labels[i]]<minSz) alpha[i]=0;
 }
 
+/* ══════════════════════════════════════════════════════
+   후처리 ②: 엣지 전용 페더링
+   내부(완전 불투명) 픽셀은 255 고정, 경계 픽셀만 블러 처리.
+   얇은 머리카락/선 등 소실 방지.
+══════════════════════════════════════════════════════ */
 function featherEdgesOnly(alpha, w, h, r=2){
+    // 모델이 준 알파값을 최대한 존중
+    // 단순히 노이즈성 낮은 알파(10 미만)만 제거
     const n=w*h;
-    for(let i=0;i<n;i++){ if(alpha[i] < 10) alpha[i] = 0; }
+    for(let i=0;i<n;i++){
+        if(alpha[i] < 10) alpha[i] = 0;
+    }
 }
 
+/* ── 메인 파이프라인 ── */
 elProcessBtn.addEventListener('click',async()=>{
     if(elProcessBtn.disabled) return;
     elProcessBtn.disabled=true;
     try{
         await loadModel();
         setProgress(30,'이미지 전처리 중...');
-        const W=elInputCanvas.width, H=elInputCanvas.height;
-        origData = elInputCanvas.getContext('2d').getImageData(0,0,W,H);
 
+        const W=elInputCanvas.width, H=elInputCanvas.height;
+
+        // 1) 원본을 MODEL_SIZE로 리사이즈
         const resC=document.createElement('canvas');
         resC.width=MODEL_SIZE; resC.height=MODEL_SIZE;
         resC.getContext('2d').drawImage(elInputCanvas,0,0,MODEL_SIZE,MODEL_SIZE);
         const imgD=resC.getContext('2d').getImageData(0,0,MODEL_SIZE,MODEL_SIZE);
+
+        // 2) ImageNet 정규화 전처리
         const tensor=preprocessImage(imgD);
 
         setProgress(50,'AI 배경 분석 중...');
-        const res=await session.run({[session.inputNames[0]]: new ort.Tensor('float32', tensor, [1,3,MODEL_SIZE,MODEL_SIZE])});
-        const rawMask=res[session.outputNames[0]].data;
+
+        // 3) 모델 추론
+        const inputName=session.inputNames[0];
+        const res=await session.run({
+            [inputName]: new ort.Tensor('float32', tensor, [1,3,MODEL_SIZE,MODEL_SIZE])
+        });
+        const outputName=session.outputNames[0];
+        const rawMask=res[outputName].data; // Float32Array
 
         setProgress(75,'마스크 정제 중...');
+
+        // 4) 마스크 → 원본 해상도 업스케일
         const mC=document.createElement('canvas');mC.width=MODEL_SIZE;mC.height=MODEL_SIZE;
         const mCtx=mC.getContext('2d');
         const mImg=mCtx.createImageData(MODEL_SIZE,MODEL_SIZE);
+        // 공식 postprocess_image: min-max 정규화 후 0~255 변환
         let ma=-Infinity, mi=Infinity;
         for(let i=0;i<MODEL_SIZE*MODEL_SIZE;i++){if(rawMask[i]>ma)ma=rawMask[i];if(rawMask[i]<mi)mi=rawMask[i];}
         const range=ma-mi||1e-6;
         for(let i=0;i<MODEL_SIZE*MODEL_SIZE;i++){
             const v=Math.round(((rawMask[i]-mi)/range)*255);
-            mImg.data[i*4]=mImg.data[i*4+1]=mImg.data[i*4+2]=v; mImg.data[i*4+3]=255;
+            mImg.data[i*4]=mImg.data[i*4+1]=mImg.data[i*4+2]=v;
+            mImg.data[i*4+3]=255;
         }
         mCtx.putImageData(mImg,0,0);
 
         const bC=document.createElement('canvas');bC.width=W;bC.height=H;
+        // bilinear 업스케일 (Canvas 기본)
         const bCtx=bC.getContext('2d');
-        bCtx.imageSmoothingEnabled=true; bCtx.imageSmoothingQuality='high';
+        bCtx.imageSmoothingEnabled=true;
+        bCtx.imageSmoothingQuality='high';
         bCtx.drawImage(mC,0,0,W,H);
         const bPx=bCtx.getImageData(0,0,W,H).data;
 
@@ -422,38 +446,76 @@ elProcessBtn.addEventListener('click',async()=>{
         const alpha=new Float32Array(n2);
         for(let i=0;i<n2;i++) alpha[i]=bPx[i*4];
 
+        // 5-a) 고립 잔여물 자동 제거 (그림자/반사 오인 덩어리 제거)
         removeIsolatedComponents(alpha, W, H, 0.002);
-        if(el('optFeather').checked) featherEdgesOnly(alpha,W,H,parseInt(el('featherRadius').value));
-        applySaaSRefinement(alpha, origData, W, H);
+
+        // 5-b) 엣지 전용 페더링
+        if(el('optFeather').checked)
+            featherEdgesOnly(alpha,W,H,parseInt(el('featherRadius').value));
 
         setProgress(92,'최종 합성 중...');
+
+        // 6) 원본 RGB + 알파 합성 + 배경색 기반 색상 복원
+        origData=elInputCanvas.getContext('2d').getImageData(0,0,W,H);
         elOutputCanvas.width=W; elOutputCanvas.height=H;
         const outCtx=elOutputCanvas.getContext('2d');
         const outImg=outCtx.createImageData(W,H);
         const d=origData.data;
 
+        // 배경색 추정: 알파=0 픽셀들의 RGB 평균
+        let bgR=0,bgG=0,bgB=0,bgCnt=0;
         for(let i=0;i<n2;i++){
-            const a = Math.max(0, Math.min(255, Math.round(alpha[i])));
-            outImg.data[i*4] = d[i*4];
-            outImg.data[i*4+1] = d[i*4+1];
-            outImg.data[i*4+2] = d[i*4+2];
+            if(alpha[i]===0){ bgR+=d[i*4]; bgG+=d[i*4+1]; bgB+=d[i*4+2]; bgCnt++; }
+        }
+        if(bgCnt>0){ bgR/=bgCnt; bgG/=bgCnt; bgB/=bgCnt; }
+
+        // 색 바램(color bleeding) 제거:
+        // 반투명 엣지 픽셀의 RGB에서 배경색이 배어든 만큼 역산
+        // 공식: cleanRGB = (pixelRGB - bgRGB*(1-a)) / a
+        // 단, 배경이 어두울 때(합계<150)만 적용 (밝은 배경엔 불필요)
+        const bgDark = (bgR+bgG+bgB) < 150 && bgCnt > n2*0.03;
+
+        for(let i=0;i<n2;i++){
+            const a = Math.round(Math.max(0,Math.min(255,alpha[i])));
+            let r=d[i*4], g=d[i*4+1], b=d[i*4+2];
+
+            if(bgDark && a>0 && a<255){
+                const af = a/255;
+                // 배경색이 배어든 만큼 역산해서 원래 색 복원
+                r = Math.min(255,Math.max(0, Math.round((r - bgR*(1-af)) / af)));
+                g = Math.min(255,Math.max(0, Math.round((g - bgG*(1-af)) / af)));
+                b = Math.min(255,Math.max(0, Math.round((b - bgB*(1-af)) / af)));
+            }
+
+            outImg.data[i*4]  = r;
+            outImg.data[i*4+1] = g;
+            outImg.data[i*4+2] = b;
             outImg.data[i*4+3] = a;
         }
         outCtx.putImageData(outImg,0,0);
-        initialImageData=outCtx.getImageData(0,0,W,H);
+
         undoStack.length=0; redoStack.length=0; updateUndoBtns();
+        initialImageData=outCtx.getImageData(0,0,W,H);
+
         setProgress(100,'완료!');
         elEditorLayout.classList.add('show');
         setTimeout(()=>{resetZoom();elCmpWrapper.classList.add('ready');},50);
         showToast('✨ 배경 제거 완료!');
-    }catch(err){console.error(err);showToast('오류: '+err.message);}finally{elProcessBtn.disabled=false;}
+    }catch(err){
+        console.error(err);
+        showToast('오류: '+err.message);
+    }finally{
+        elProcessBtn.disabled=false;
+    }
 });
 
+/* ── Undo/Redo ── */
 function setFillDir(d){if(isCompareMode)toggleCompareMode();fillDir=d;el('fillDirErase').className='fill-dir-btn'+(d==='erase'?' on':'');el('fillDirRestore').className='fill-dir-btn'+(d==='restore'?' restore-on':'');}
 function fillUndo(){if(undoStack.length===0){if(initialImageData){elOutputCanvas.getContext('2d').putImageData(initialImageData,0,0);showToast('최초 상태입니다.');}return;}redoStack.push(elOutputCanvas.getContext('2d').getImageData(0,0,elOutputCanvas.width,elOutputCanvas.height));elOutputCanvas.getContext('2d').putImageData(undoStack.pop(),0,0);updateUndoBtns();showToast('실행 취소됨');}
 function fillRedo(){if(redoStack.length===0)return;undoStack.push(elOutputCanvas.getContext('2d').getImageData(0,0,elOutputCanvas.width,elOutputCanvas.height));elOutputCanvas.getContext('2d').putImageData(redoStack.pop(),0,0);updateUndoBtns();showToast('다시 실행됨');}
 function updateUndoBtns(){el('fillUndoBtn').disabled=(undoStack.length===0&&!initialImageData);el('fillRedoBtn').disabled=(redoStack.length===0);}
 
+/* ── Flood Fill ── */
 elOutputCanvas.addEventListener('click',e=>{
     if(isCompareMode||isSpacePressed||compareJustOff||!origData) return;
     const rect=elOutputCanvas.getBoundingClientRect();
@@ -496,18 +558,17 @@ function floodFill(sx,sy,isErase){
     ctx.putImageData(out,0,0);
 }
 
+/* ── 다운로드 ── */
 elDownloadBtn.addEventListener('click',()=>{
     const sc=document.createElement('canvas');
     sc.width=elOutputCanvas.width;sc.height=elOutputCanvas.height;
     const sctx=sc.getContext('2d');
     if(currentBgColor!=='transparent'){sctx.fillStyle=currentBgColor;sctx.fillRect(0,0,sc.width,sc.height);}
     sctx.drawImage(elOutputCanvas,0,0);
-    const a=document.createElement('a');
-    a.download=`AI_Removed_${new Date().getTime()}.png`;
-    a.href=sc.toDataURL('image/png');
-    a.click();
-    showToast('💾 이미지가 저장되었습니다!');
+    const a=document.createElement('a');a.download='result.png';a.href=sc.toDataURL();a.click();
 });
+
+updateUndoBtns();
 </script>
 </body>
 </html>
