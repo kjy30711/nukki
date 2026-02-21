@@ -365,19 +365,24 @@ elProcessBtn.addEventListener('click', async()=>{
         setProgress(10, '이미지 준비 중...');
         const W=elInputCanvas.width, H=elInputCanvas.height;
 
-        // 1) 캔버스 → Blob → FormData
+        // 1) 캔버스 → Blob → FormData (Content-Type 자동 설정)
         const blob = await new Promise(res => elInputCanvas.toBlob(res, 'image/png'));
         const formData = new FormData();
-        formData.append('image', blob, 'image.png');
+        formData.append('image', new File([blob], 'image.png', { type: 'image/png' }));
 
         setProgress(30, 'AI 배경 제거 중... (2~5초)');
 
         // 2) Cloudflare Workers AI 호출
+        // FormData를 fetch에 넘기면 브라우저가 Content-Type: multipart/form-data; boundary=... 자동 설정
         const res = await fetch(WORKERS_URL, {
             method: 'POST',
             body: formData
+            // Content-Type 헤더를 직접 설정하면 boundary가 빠져서 오류 → 브라우저 자동 설정에 맡김
         });
-        if(!res.ok) throw new Error(`서버 오류: ${res.status}`);
+        if(!res.ok){
+            const errText = await res.text().catch(()=>'');
+            throw new Error(`서버 오류: ${res.status} ${errText}`);
+        }
 
         setProgress(70, '결과 처리 중...');
 
