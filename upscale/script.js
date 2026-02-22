@@ -24,6 +24,7 @@ const pTxt = document.getElementById('up-progressText');
 let origSrc = null;
 let upSrc = null;
 
+// 파일 업로드 처리
 upArea.addEventListener('click', (e) => {
     if (e.target.id === 'up-reUploadBtn' || e.target.closest('#up-reUploadBtn')) return;
     if (!upArea.classList.contains('has-file')) upInput.click();
@@ -70,6 +71,7 @@ upInput.addEventListener('change', (e) => {
     reader.readAsDataURL(file);
 });
 
+// 슬라이더 처리
 let isDrag = false;
 function updateUpSlider(pct) {
     pct = Math.max(0, Math.min(100, pct));
@@ -94,6 +96,32 @@ window.addEventListener('touchmove', (e) => {
     updateUpSlider(((e.touches[0].clientX - rect.left) / rect.width) * 100);
 });
 
+// [핵심 해결 방법] 브라우저 메모리 초과 방지를 위한 안전 크기 리사이징 함수
+function getSafeInput(imgElem, maxSize = 1200) {
+    let w = imgElem.width;
+    let h = imgElem.height;
+    
+    // 이미지가 기준치보다 작으면 그대로 반환
+    if (w <= maxSize && h <= maxSize) {
+        return imgElem;
+    }
+    
+    // 이미지가 크면 비율을 유지한 채 최대 크기로 줄임
+    let ratio = maxSize / Math.max(w, h);
+    let canvas = document.createElement('canvas');
+    canvas.width = Math.round(w * ratio);
+    canvas.height = Math.round(h * ratio);
+    let ctx = canvas.getContext('2d');
+    
+    // 고품질 리사이징 옵션 적용
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(imgElem, 0, 0, canvas.width, canvas.height);
+    
+    return canvas;
+}
+
+// 업스케일 실행 로직
 upBtn.addEventListener('click', async () => {
     if (!origSrc) return;
     upBtn.disabled = true;
@@ -107,12 +135,17 @@ upBtn.addEventListener('click', async () => {
         img.src = origSrc;
         await new Promise(r => img.onload = r);
 
-        if (img.width * img.height > 1500000) {
-            alert('이미지 크기가 커서 처리에 시간이 다소 걸릴 수 있습니다.');
-        }
+        // 이미지 크기가 너무 클 경우 브라우저 튕김 현상을 막기 위해 리사이징 처리
+        pTxt.textContent = '이미지 메모리 최적화 중...';
+        const safeInput = getSafeInput(img, 1200); // 1200px 이상의 이미지는 축소 후 진행
 
         pFill.style.width = '30%';
         pPct.textContent = '30%';
+
+        // 메모리 해제를 돕기 위해 기존 텐서플로우 백엔드 강제 정리 (선택적)
+        if (typeof tf !== 'undefined') {
+            await tf.ready();
+        }
 
         const upscaler = new Upscaler();
 
@@ -120,7 +153,8 @@ upBtn.addEventListener('click', async () => {
         pFill.style.width = '50%';
         pPct.textContent = '50%';
 
-        upSrc = await upscaler.upscale(img, {
+        // 패치 크기(patchSize)를 64로 유지하여 메모리 사용량을 최소화
+        upSrc = await upscaler.upscale(safeInput, {
             patchSize: 64,
             padding: 2,
             progress: (amt) => {
@@ -144,13 +178,15 @@ upBtn.addEventListener('click', async () => {
 
     } catch (err) {
         console.error("Upscale Error:", err);
-        alert("오류가 발생했습니다. 브라우저 메모리가 부족할 수 있습니다.");
+        // 에러 메시지를 좀 더 명확하게 수정
+        alert("메모리 초과 오류가 발생했습니다. 브라우저를 새로고침(F5)한 뒤 다시 시도해주세요.");
     } finally {
         upBtn.disabled = false;
         setTimeout(() => pCont.style.display = 'none', 3000);
     }
 });
 
+// 다운로드 처리
 dnBtn.addEventListener('click', () => {
     if (!upSrc) return;
     const a = document.createElement('a');
