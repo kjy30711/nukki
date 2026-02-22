@@ -24,6 +24,9 @@ const pTxt = document.getElementById('up-progressText');
 let origSrc = null;
 let upSrc = null;
 
+// [추가] AI 모델을 전역 변수로 선언하여 한 번만 로딩 (메모리 누수 방지)
+let globalUpscaler = null;
+
 // 파일 업로드 처리
 upArea.addEventListener('click', (e) => {
     if (e.target.id === 'up-reUploadBtn' || e.target.closest('#up-reUploadBtn')) return;
@@ -96,24 +99,21 @@ window.addEventListener('touchmove', (e) => {
     updateUpSlider(((e.touches[0].clientX - rect.left) / rect.width) * 100);
 });
 
-// [핵심 해결 방법] 브라우저 메모리 초과 방지를 위한 안전 크기 리사이징 함수
-function getSafeInput(imgElem, maxSize = 1200) {
+// 브라우저 튕김 방지용 한계치 대폭 축소 (800px)
+function getSafeInput(imgElem, maxSize = 800) {
     let w = imgElem.width;
     let h = imgElem.height;
     
-    // 이미지가 기준치보다 작으면 그대로 반환
     if (w <= maxSize && h <= maxSize) {
         return imgElem;
     }
     
-    // 이미지가 크면 비율을 유지한 채 최대 크기로 줄임
     let ratio = maxSize / Math.max(w, h);
     let canvas = document.createElement('canvas');
     canvas.width = Math.round(w * ratio);
     canvas.height = Math.round(h * ratio);
     let ctx = canvas.getContext('2d');
     
-    // 고품질 리사이징 옵션 적용
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(imgElem, 0, 0, canvas.width, canvas.height);
@@ -126,39 +126,37 @@ upBtn.addEventListener('click', async () => {
     if (!origSrc) return;
     upBtn.disabled = true;
     pCont.style.display = 'block';
-    pTxt.textContent = 'AI 모델 로딩 중...';
-    pFill.style.width = '10%';
-    pPct.textContent = '10%';
+    pTxt.textContent = '메모리 정리 및 준비 중...';
+    pFill.style.width = '5%';
+    pPct.textContent = '5%';
 
     try {
         const img = new Image();
         img.src = origSrc;
         await new Promise(r => img.onload = r);
 
-        // 이미지 크기가 너무 클 경우 브라우저 튕김 현상을 막기 위해 리사이징 처리
-        pTxt.textContent = '이미지 메모리 최적화 중...';
-        const safeInput = getSafeInput(img, 1200); // 1200px 이상의 이미지는 축소 후 진행
+        pTxt.textContent = '이미지 규격 최적화 중...';
+        const safeInput = getSafeInput(img, 800); 
 
+        pFill.style.width = '15%';
+        pPct.textContent = '15%';
+
+        // 모델이 없으면 생성, 있으면 기존 모델 재사용 (매우 중요)
+        if (!globalUpscaler) {
+            pTxt.textContent = 'AI 모델 로딩 중 (최초 1회만)...';
+            globalUpscaler = new Upscaler();
+        }
+
+        pTxt.textContent = '해상도 복원 및 화질 개선 중...';
         pFill.style.width = '30%';
         pPct.textContent = '30%';
 
-        // 메모리 해제를 돕기 위해 기존 텐서플로우 백엔드 강제 정리 (선택적)
-        if (typeof tf !== 'undefined') {
-            await tf.ready();
-        }
-
-        const upscaler = new Upscaler();
-
-        pTxt.textContent = '해상도 복원 및 화질 개선 중...';
-        pFill.style.width = '50%';
-        pPct.textContent = '50%';
-
-        // 패치 크기(patchSize)를 64로 유지하여 메모리 사용량을 최소화
-        upSrc = await upscaler.upscale(safeInput, {
-            patchSize: 64,
-            padding: 2,
+        // 더 잘게 쪼개서 연산 (patchSize 32, 경계선 보정을 위해 padding 4)
+        upSrc = await globalUpscaler.upscale(safeInput, {
+            patchSize: 32,
+            padding: 4,
             progress: (amt) => {
-                const pct = Math.round(50 + (amt * 50)); 
+                const pct = Math.round(30 + (amt * 70)); 
                 pFill.style.width = `${pct}%`;
                 pPct.textContent = `${pct}%`;
             }
@@ -178,8 +176,7 @@ upBtn.addEventListener('click', async () => {
 
     } catch (err) {
         console.error("Upscale Error:", err);
-        // 에러 메시지를 좀 더 명확하게 수정
-        alert("메모리 초과 오류가 발생했습니다. 브라우저를 새로고침(F5)한 뒤 다시 시도해주세요.");
+        alert("메모리 초과 오류가 발생했습니다.\n\n해결방법: 브라우저 창을 완전히 닫았다가 다시 열어주세요(캐시 비우기).");
     } finally {
         upBtn.disabled = false;
         setTimeout(() => pCont.style.display = 'none', 3000);
