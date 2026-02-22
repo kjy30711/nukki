@@ -249,7 +249,7 @@
 <div class="toast" id="toastEl">✅ 완료!</div>
 
 <script>
-const HF_API = 'https://api-inference.huggingface.co/models/briaai/RMBG-2.0';
+const WORKERS_URL = 'https://nukki.kjy30711.workers.dev';
 
 let origData=null, isCompareMode=false;
 let scale=1, posX=0, posY=0, isDragging=false, isSpacePressed=false, lastMouseX=0, lastMouseY=0;
@@ -384,51 +384,31 @@ elProcessBtn.addEventListener('click', async()=>{
         setProgress(10, '이미지 준비 중...');
         const W=elInputCanvas.width, H=elInputCanvas.height;
 
-        // 1) 캔버스 → Blob (바이너리 직접 전송)
-        const blob = await new Promise(res => elInputCanvas.toBlob(res, 'image/png'));
-        const arrayBuffer = await blob.arrayBuffer();
+        // 1) 캔버스 → base64 변환
+        const imageBase64 = elInputCanvas.toDataURL('image/png').split(',')[1];
 
         setProgress(30, 'AI 배경 제거 중... (3~10초)');
 
-        // 2) Hugging Face Inference API 호출
-        // RMBG-2.0: 현재 가장 정확한 배경제거 모델
-        const res = await fetch(HF_API, {
+        // 2) Workers 프록시 통해 HF RMBG-2.0 호출
+        const callWorkers = async () => fetch(WORKERS_URL, {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'image/png',
-                'Accept': 'image/png'
-            },
-            body: arrayBuffer
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: apiKey, imageBase64 })
         });
 
-        if(res.status === 503){
-            // 모델 로딩 중 (콜드 스타트) → 재시도
-            setProgress(40, '모델 준비 중... 잠시만 기다려주세요 (최초 1회)');
-            await new Promise(r => setTimeout(r, 8000));
-            const res2 = await fetch(HF_API, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Content-Type': 'image/png',
-                    'Accept': 'image/png'
-                },
-                body: arrayBuffer
-            });
-            if(!res2.ok){
-                const errText = await res2.text().catch(()=>'');
-                throw new Error(`HF 오류: ${res2.status} ${errText}`);
-            }
-            var finalRes = res2;
-        } else if(!res.ok){
-            const errText = await res.text().catch(()=>'');
-            throw new Error(`HF 오류: ${res.status} ${errText}`);
-        } else {
-            var finalRes = res;
+        let _res = await callWorkers();
+
+        // 503: 모델 콜드스타트 → 20초 후 자동 재시도
+        if(_res.status === 503){
+            setProgress(40, '모델 준비 중... 잠시만 기다려주세요 (최초 1회 20초)');
+            await new Promise(r => setTimeout(r, 20000));
+            _res = await callWorkers();
         }
 
-        // finalRes → res 변수로 통일
-        const _res = finalRes;
+        if(!_res.ok){
+            const errJson = await _res.json().catch(()=>({}));
+            throw new Error(errJson.error || `오류: ${_res.status}`);
+        }
 
         setProgress(70, '결과 처리 중...');
 
