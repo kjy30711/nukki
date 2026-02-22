@@ -126,6 +126,23 @@
             </div>
         </label>
 
+        <!-- Remove.bg API 키 입력 -->
+        <div style="margin-bottom:12px;">
+            <div style="display:flex;align-items:center;gap:8px;background:#f1f5f9;border:2px solid #e2e8f0;border-radius:14px;padding:10px 14px;">
+                <i class="fas fa-key" style="color:#6366f1;font-size:.9rem;"></i>
+                <input type="password" id="apiKeyInput" placeholder="Hugging Face Token (hf_...)"
+                    style="flex:1;border:none;background:transparent;outline:none;font-size:.85rem;color:#1e293b;"
+                    oninput="checkApiKey()">
+                <a href="https://huggingface.co/settings/tokens" target="_blank"
+                    style="font-size:.72rem;color:#6366f1;text-decoration:none;white-space:nowrap;font-weight:700;">
+                    무료 발급 →
+                </a>
+            </div>
+            <p style="font-size:.72rem;color:#94a3b8;margin-top:6px;padding:0 4px;">
+                완전 무료 무제한 · 토큰은 이 브라우저에만 저장됩니다
+            </p>
+        </div>
+
         <button class="btn btn-primary" id="processBtn" disabled>
             <i class="fas fa-magic"></i> 배경 제거 시작하기
         </button>
@@ -232,8 +249,7 @@
 <div class="toast" id="toastEl">✅ 완료!</div>
 
 <script>
-// Cloudflare Workers AI 엔드포인트
-const WORKERS_URL = 'https://nukki.kjy30711.workers.dev';
+const HF_API = 'https://api-inference.huggingface.co/models/briaai/RMBG-2.0';
 
 let origData=null, isCompareMode=false;
 let scale=1, posX=0, posY=0, isDragging=false, isSpacePressed=false, lastMouseX=0, lastMouseY=0;
@@ -316,7 +332,7 @@ elUpload.addEventListener('change',e=>{
             el('uploadUI').style.display='none';
             el('fileRow').classList.add('show');
             elUploadCard.classList.add('has-file');
-            elProcessBtn.disabled=false;
+            checkApiKey();
             elEditorLayout.classList.remove('show');
             elCmpWrapper.classList.remove('ready');
             undoStack.length=0;redoStack.length=0;updateUndoBtns();
@@ -362,32 +378,62 @@ elProcessBtn.addEventListener('click', async()=>{
     if(elProcessBtn.disabled) return;
     elProcessBtn.disabled=true;
     try{
+        const apiKey = el('apiKeyInput').value.trim();
+        if(!apiKey) throw new Error('Hugging Face 토큰을 입력해주세요');
+
         setProgress(10, '이미지 준비 중...');
         const W=elInputCanvas.width, H=elInputCanvas.height;
 
-        // 1) 캔버스 → Blob → FormData (Content-Type 자동 설정)
+        // 1) 캔버스 → Blob (바이너리 직접 전송)
         const blob = await new Promise(res => elInputCanvas.toBlob(res, 'image/png'));
-        const formData = new FormData();
-        formData.append('image', new File([blob], 'image.png', { type: 'image/png' }));
+        const arrayBuffer = await blob.arrayBuffer();
 
-        setProgress(30, 'AI 배경 제거 중... (2~5초)');
+        setProgress(30, 'AI 배경 제거 중... (3~10초)');
 
-        // 2) Cloudflare Workers AI 호출
-        // FormData를 fetch에 넘기면 브라우저가 Content-Type: multipart/form-data; boundary=... 자동 설정
-        const res = await fetch(WORKERS_URL, {
+        // 2) Hugging Face Inference API 호출
+        // RMBG-2.0: 현재 가장 정확한 배경제거 모델
+        const res = await fetch(HF_API, {
             method: 'POST',
-            body: formData
-            // Content-Type 헤더를 직접 설정하면 boundary가 빠져서 오류 → 브라우저 자동 설정에 맡김
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'image/png',
+                'Accept': 'image/png'
+            },
+            body: arrayBuffer
         });
-        if(!res.ok){
+
+        if(res.status === 503){
+            // 모델 로딩 중 (콜드 스타트) → 재시도
+            setProgress(40, '모델 준비 중... 잠시만 기다려주세요 (최초 1회)');
+            await new Promise(r => setTimeout(r, 8000));
+            const res2 = await fetch(HF_API, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'image/png',
+                    'Accept': 'image/png'
+                },
+                body: arrayBuffer
+            });
+            if(!res2.ok){
+                const errText = await res2.text().catch(()=>'');
+                throw new Error(`HF 오류: ${res2.status} ${errText}`);
+            }
+            var finalRes = res2;
+        } else if(!res.ok){
             const errText = await res.text().catch(()=>'');
-            throw new Error(`서버 오류: ${res.status} ${errText}`);
+            throw new Error(`HF 오류: ${res.status} ${errText}`);
+        } else {
+            var finalRes = res;
         }
+
+        // finalRes → res 변수로 통일
+        const _res = finalRes;
 
         setProgress(70, '결과 처리 중...');
 
         // 3) 반환된 PNG(투명 배경) → 캔버스에 그려서 알파 추출
-        const resultBlob = await res.blob();
+        const resultBlob = await _res.blob();
         const resultUrl  = URL.createObjectURL(resultBlob);
         const resultImg  = await new Promise((res, rej)=>{
             const img=new Image();
@@ -628,6 +674,17 @@ elDownloadBtn.addEventListener('click',()=>{
     sctx.drawImage(elOutputCanvas,0,0);
     const a=document.createElement('a');a.download='누끼결과.png';a.href=sc.toDataURL();a.click();
 });
+
+// API 키 입력시 버튼 활성화 체크
+function checkApiKey(){
+    const hasKey = el('apiKeyInput').value.trim().length > 0;
+    const hasFile = elUploadCard.classList.contains('has-file');
+    elProcessBtn.disabled = !(hasKey && hasFile);
+}
+
+// 파일 선택 후에도 키 체크
+const _origUploadChange = elUpload.onchange;
+elUpload.addEventListener('change', ()=> setTimeout(checkApiKey, 100));
 
 updateUndoBtns();
 </script>
