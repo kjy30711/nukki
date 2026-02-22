@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Studio Pro - Upscaler</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.20.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/upscaler@0.21.1/dist/browser.umd.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <div class="bg-header"></div>
+    <div class="wrap">
+        <div class="hero" style="padding-bottom: 20px;">
+            <h1>✨ AI Studio Pro</h1>
+            <p>배경 제거와 화질 개선을 한 곳에서 해결하는 프로페셔널 편집기</p>
+        </div>
+        <div class="main-tabs-wrapper">
+            <div class="main-tabs">
+                <button class="main-tab-btn" onclick="location.href='../index.html'">
+                    <i class="fas fa-eraser"></i> 배경 제거
+                </button>
+                <button class="main-tab-btn active" onclick="location.href='upscale.html'">
+                    <i class="fas fa-expand-arrows-alt"></i> 화질 업스케일
+                </button>
+            </div>
+        </div>
+        <div class="upscale-card">
+            <div class="sidebar" style="display:flex; flex-direction:column; gap:24px;">
+                <input type="file" id="up-uploadInput" accept="image/*" style="display:none;">
+                <label class="upload-label" id="up-uploadArea" style="margin-bottom:0;">
+                    <div id="up-uploadUI">
+                        <div class="upload-icon"><i class="fas fa-cloud-upload-alt"></i></div>
+                        <h3 style="color:#1e293b; font-weight:800; font-size:1.1rem;">이미지 업로드</h3>
+                        <p style="color:#64748b; margin-top:6px; font-size:0.9rem;">클릭하여 원본 선택</p>
+                    </div>
+                    <div class="file-row" id="up-fileRow">
+                        <img class="file-thumb" id="up-thumb" src="" alt="">
+                        <div style="flex:1; min-width:0; text-align:left;">
+                            <h4 id="up-fileNameText" style="font-size:0.95rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">-</h4>
+                            <span id="up-fileMeta" style="color:#64748b; font-size:0.8rem;">-</span>
+                        </div>
+                        <span class="btn btn-outline" id="up-reUploadBtn" style="padding:6px 12px; cursor:pointer;">변경</span>
+                    </div>
+                </label>
+                <div class="tool-panel" style="padding:20px;">
+                    <h3 style="font-size:1rem; color:#92400e; font-weight:900; margin-bottom:16px;">
+                        <i class="fas fa-search-plus"></i> 스케일 정보
+                    </h3>
+                    <div class="tab-bar" style="margin-bottom:0;">
+                        <button class="tab-btn active" data-scale="2">2x (기본)</button>
+                        <button class="tab-btn" disabled title="메모리 제한으로 준비중입니다">4x (Ultra)</button>
+                    </div>
+                </div>
+                <button class="btn btn-primary" id="up-upscaleBtn" disabled style="width:100%; margin:0; padding:16px;">
+                    <i class="fas fa-magic"></i> 고화질 업스케일 시작
+                </button>
+                <div id="up-progressContainer" style="display:none;">
+                    <div style="display:flex; justify-content:space-between; font-size:0.85rem; font-weight:600; color:#64748b;">
+                        <span id="up-progressText">AI 모델 로딩 중...</span>
+                        <span id="up-progressPercent">0%</span>
+                    </div>
+                    <div style="height:8px; background:#e2e8f0; border-radius:10px; overflow:hidden; margin-top:8px;">
+                        <div id="up-progressFill" style="width:0%; height:100%; background:var(--primary); transition:0.3s;"></div>
+                    </div>
+                </div>
+                <button class="btn btn-success" id="up-downloadBtn" style="display:none; width:100%; padding:16px;">
+                    <i class="fas fa-download"></i> 결과 저장 (PNG)
+                </button>
+            </div>
+            <div class="work-area" id="up-viewerArea" style="min-height:560px; display:flex; align-items:center; justify-content:center;">
+                <div id="up-emptyState" style="text-align:center; color:#94a3b8;">
+                    <i class="fas fa-image" style="font-size:48px; opacity:0.3; margin-bottom:16px;"></i>
+                    <h3 style="font-weight:800; color:#cbd5e1;">이미지 미리보기</h3>
+                </div>
+                <div id="up-compareContainer" style="display:none; position:relative; width:100%; height:100%; cursor:ew-resize;">
+                    <div class="badge-ui" style="left:16px;">Original</div>
+                    <div class="badge-ui" style="right:16px; left:auto;">Upscaled</div>
+                    <img src="" id="up-imgAfter" style="position:absolute; top:0; left:0; width:100%; height:100%; object-fit:contain; z-index:1; pointer-events:none;" alt="">
+                    <img src="" id="up-imgBefore" style="position:absolute; top:0; left:0; width:100%; height:100%; object-fit:contain; z-index:2; pointer-events:none; clip-path:polygon(0 0, 50% 0, 50% 100%, 0 100%);" alt="">
+                    <div id="up-sliderLine" style="position:absolute; top:0; bottom:0; left:50%; width:3px; background:#fff; z-index:3; transform:translateX(-50%); pointer-events:none; box-shadow:0 0 10px rgba(0,0,0,0.2);"></div>
+                    <div id="up-sliderBtn" style="position:absolute; top:50%; left:50%; width:36px; height:36px; background:#fff; border-radius:50%; z-index:4; transform:translate(-50%, -50%); display:flex; align-items:center; justify-content:center; color:var(--primary); pointer-events:none; box-shadow:0 4px 10px rgba(0,0,0,0.15);">
+                        <i class="fas fa-arrows-alt-h"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>

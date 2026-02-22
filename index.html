@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Studio Pro - Background Remover</title>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+    <link rel="stylesheet" href="nukki/style.css" />
+</head>
+<body>
+    <div class="bg-header"></div>
+    <div class="wrap">
+        <div class="hero" style="padding-bottom: 20px;">
+            <h1>✨ AI Studio Pro</h1>
+            <p>배경 제거와 화질 개선을 한 곳에서 해결하는 프로페셔널 편집기</p>
+        </div>
+        <div class="main-tabs-wrapper">
+            <div class="main-tabs">
+                <button class="main-tab-btn active" onclick="location.href='index.html'">
+                    <i class="fas fa-eraser"></i> 배경 제거
+                </button>
+                <button class="main-tab-btn" onclick="location.href='upscale/upscale.html'">
+                    <i class="fas fa-expand-arrows-alt"></i> 화질 업스케일
+                </button>
+            </div>
+        </div>
+        <div class="main-card">
+            <input type="file" id="upload" accept="image/*">
+            <label class="upload-label" id="uploadCard">
+                <div id="uploadUI">
+                    <div class="upload-icon"><i class="fas fa-cloud-upload-alt"></i></div>
+                    <h3>이미지 업로드</h3>
+                    <p style="color:#94a3b8; margin-top:6px; font-size:.9rem;">클릭하여 파일 선택</p>
+                </div>
+                <div class="file-row" id="fileRow">
+                    <img class="file-thumb" id="thumb" src="" alt="">
+                    <div>
+                        <h4 id="fName">-</h4>
+                        <span id="fMeta" style="color:#94a3b8; font-size:.8rem;">-</span>
+                    </div>
+                    <span class="btn btn-outline" id="reUploadBtn" style="margin-left:auto; padding:8px 16px; cursor:pointer;">변경</span>
+                </div>
+            </label>
+            <button class="btn btn-primary" id="processBtn" disabled><i class="fas fa-magic"></i> 배경 제거 시작하기</button>
+            <div id="progWrap" style="display:none; margin:20px 0;">
+                <div style="height:8px; background:#e2e8f0; border-radius:10px; overflow:hidden;">
+                    <div id="progressBar" style="width:0%; height:100%; background:var(--primary); transition:.3s;"></div>
+                </div>
+                <p id="statusText" style="text-align:center; font-size:.85rem; margin-top:8px; font-weight:600;"></p>
+            </div>
+            <div class="editor-layout" id="editorLayout">
+                <div class="work-area">
+                    <div class="badge-ui" id="compBadge"><i class="fas fa-info-circle"></i> Ctrl+휠:줌 | Space+클릭:이동 | Ctrl+Z/Y:되돌리기</div>
+                    <div class="badge-ui" id="zoomBadge"><i class="fas fa-search"></i> <span id="zoomVal">100</span>%</div>
+                    <div class="zoom-controls">
+                        <button class="zoom-btn" onclick="manualZoom(.2)"><i class="fas fa-plus"></i></button>
+                        <button class="zoom-btn" onclick="manualZoom(-.2)"><i class="fas fa-minus"></i></button>
+                        <button class="zoom-btn" onclick="resetZoom(true)"><i class="fas fa-expand"></i></button>
+                        <button class="zoom-btn" id="btnCompareMode" onclick="toggleCompareMode(event)"><i class="fas fa-columns"></i></button>
+                    </div>
+                    <div class="canvas-container" id="canvasContainer">
+                        <div id="compareWrapper">
+                            <img id="originalOverlay" src="" alt="">
+                            <div class="compare-bar" id="compareBar"></div>
+                            <canvas id="outputCanvas"></canvas>
+                        </div>
+                        <canvas id="inputCanvas" style="display:none"></canvas>
+                    </div>
+                </div>
+                <div class="tool-panel">
+                    <div class="sec-header" style="margin-top:0;"><i class="fas fa-paint-brush"></i> 편집 도구</div>
+                    <div class="tab-bar">
+                        <button class="tab-btn active" id="tabMagic" onclick="switchTab('magic')"><i class="fas fa-magic"></i> Magic Brush</button>
+                        <button class="tab-btn" id="tabFill" onclick="switchTab('fill')"><i class="fas fa-fill-drip"></i> 영역 수정</button>
+                    </div>
+                    <div class="tab-content show" id="contentMagic">
+                        <p class="tip-text">브러시로 문지르면 색상을 자동 감지하여<br>배경을 제거하거나 복구합니다.</p>
+                        <div class="fill-dir-btns" style="margin-bottom:14px;">
+                            <button class="fill-dir-btn on" id="brushDirErase" onclick="setBrushDir('erase'); this.blur();"><i class="fas fa-eraser"></i> 배경 지우기</button>
+                            <button class="fill-dir-btn" id="brushDirRestore" onclick="setBrushDir('restore'); this.blur();"><i class="fas fa-undo-alt"></i> 영역 복구</button>
+                        </div>
+                        <div class="sub-panel">
+                            <div class="brush-row">
+                                <label>크기</label>
+                                <input type="range" class="brush-slider" id="brushSize" min="5" max="150" value="40" oninput="brushSize=+this.value; document.getElementById('brushSizeVal').textContent=this.value;">
+                                <span class="brush-val" id="brushSizeVal">40</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="tab-content" id="contentFill">
+                        <p class="tip-text">클릭하면 유사한 색상 영역을 자동으로<br>한 번에 제거하거나 복구합니다.</p>
+                        <div class="fill-dir-btns" style="margin-bottom:14px;">
+                            <button class="fill-dir-btn on" id="fillDirErase" onclick="setFillDir('erase'); this.blur();"><i class="fas fa-eraser"></i> 영역 자동 삭제</button>
+                            <button class="fill-dir-btn" id="fillDirRestore" onclick="setFillDir('restore'); this.blur();"><i class="fas fa-undo-alt"></i> 영역 자동 복구</button>
+                        </div>
+                        <div class="sub-panel">
+                            <div class="brush-row">
+                                <label>허용치</label>
+                                <input type="range" class="brush-slider" id="fillTolerance" min="1" max="150" value="32" oninput="fillTolerance=+this.value; document.getElementById('fillTolVal').textContent=this.value;">
+                                <span class="brush-val" id="fillTolVal">32</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="bg-mini-wrap">
+                        <input type="color" id="bgColorInput" value="#ffffff" oninput="changeBgColor(this.value)">
+                        <span class="bg-mini-label">배경색</span>
+                        <button class="btn-mini-trans" onclick="resetBgTransparent()">투명하게</button>
+                    </div>
+                    <div class="action-btns" style="margin-bottom:20px;">
+                        <button class="btn btn-outline" id="fillUndoBtn" onclick="fillUndo(); this.blur();" disabled><i class="fas fa-undo"></i></button>
+                        <button class="btn btn-outline" id="fillRedoBtn" onclick="fillRedo(); this.blur();" disabled><i class="fas fa-redo"></i></button>
+                    </div>
+                    <button class="btn btn-success" id="downloadBtn"><i class="fas fa-download"></i> 결과 저장 (PNG)</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="fill-cursor" id="fillCursor" style="transform:translate(-50%,-50%);">
+        <div class="fill-cursor-ring" id="fillCursorRing" style="width:30px; height:30px;"></div>
+    </div>
+    <div class="toast" id="toastEl">✅ 완료!</div>
+    <script src="nukki/script.js"></script>
+</body>
+</html>
